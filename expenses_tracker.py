@@ -4,7 +4,7 @@ import io
 import time
 
 # --- Configuration ---
-st.set_page_config(page_title="H & M Expenses", page_icon="💰")
+st.set_page_config(page_title="H & M Expenses", page_icon="💰", layout="wide")
 
 CATEGORIES = [
     "Rent", "Wifi", "Mobile phone plan", "Hydro/Electricity", "Insurance",
@@ -21,28 +21,22 @@ if 'expenses' not in st.session_state:
 def add_expense(category, amount, payer, consumer):
     """Adds a new expense to the session state."""
     st.session_state.expenses.append({
-        "id": time.time(),  # Simple unique ID
         "Category": category,
-        "Amount": amount,
+        "Amount": float(amount),
         "Payer": payer,
         "Consumer": consumer
     })
 
 
-def remove_expense(index):
-    """Removes an expense by index."""
-    st.session_state.expenses.pop(index)
-
-
-def calculate_settlement():
-    """Calculates totals and who owes whom."""
+def calculate_settlement(data):
+    """Calculates totals and who owes whom based on the provided list of dicts."""
     total_paid_h = 0.0
     total_paid_m = 0.0
     cost_h = 0.0
     cost_m = 0.0
 
-    for exp in st.session_state.expenses:
-        amt = exp['Amount']
+    for exp in data:
+        amt = float(exp['Amount'])
 
         # Who Paid (Cash Flow)
         if exp['Payer'] == 'H':
@@ -59,23 +53,22 @@ def calculate_settlement():
         else:  # M only
             cost_m += amt
 
-    # Net Balance: Positive means M owes H, Negative means H owes M
-    # Logic: (Amount H Paid) - (Amount H Consumed)
-    # If H paid 100 but only ate 50, balance is +50 (H is owed 50)
     balance_h = total_paid_h - cost_h
-
     return total_paid_h, total_paid_m, cost_h, cost_m, balance_h
 
 
-def generate_csv():
+def generate_csv(data):
     """Generates the CSV string with Google Sheets formulas."""
     grouped = {cat: {"H": [], "M": [], "Split": []} for cat in CATEGORIES}
 
-    # Organize data
-    for exp in st.session_state.expenses:
+    for exp in data:
         cat = exp['Category']
         amt = exp['Amount']
         cons = exp['Consumer']
+
+        # Safety check if category was typed manually and not in list
+        if cat not in grouped:
+            grouped[cat] = {"H": [], "M": [], "Split": []}
 
         if cons == 'H only':
             grouped[cat]["H"].append(amt)
@@ -84,31 +77,27 @@ def generate_csv():
         else:
             grouped[cat]["Split"].append(amt)
 
-    # Build CSV Rows
     output = io.StringIO()
     output.write("Category,H Cost (Formula),M Cost (Formula),Total Category Cost\n")
 
-    for cat in CATEGORIES:
+    for cat in grouped:
         h_vals = grouped[cat]["H"]
         m_vals = grouped[cat]["M"]
         s_vals = grouped[cat]["Split"]
 
-        # Only write if there's data
         if h_vals or m_vals or s_vals:
-            # Create formula string: =((20+10) + (50+30)/2)
             p_h = "+".join(map(str, h_vals)) if h_vals else "0"
             p_m = "+".join(map(str, m_vals)) if m_vals else "0"
             s_all = "+".join(map(str, s_vals)) if s_vals else "0"
 
             h_formula = f"=(({p_h}) + ({s_all})/2)"
             m_formula = f"=(({p_m}) + ({s_all})/2)"
-
             total_val = sum(h_vals) + sum(m_vals) + sum(s_vals)
 
             output.write(f"{cat},{h_formula},{m_formula},{total_val}\n")
 
     # Summary Section
-    tp_h, tp_m, c_h, c_m, bal = calculate_settlement()
+    tp_h, tp_m, c_h, c_m, bal = calculate_settlement(data)
     settlement_txt = f"M owes H: ${abs(bal):.2f}" if bal > 0 else f"H owes M: ${abs(bal):.2f}"
     if abs(bal) < 0.01: settlement_txt = "All Square"
 
@@ -120,88 +109,110 @@ def generate_csv():
 
 
 # --- UI Layout ---
-
 st.title("H & M Expense Tracker 💸")
-st.markdown("Add monthly expenses and calculate who owes whom.")
 
-# Create two columns for layout: Input Form (Left) and Summary/List (Right)
-col1, col2 = st.columns([1, 1.5], gap="large")
-
-with col1:
-    st.subheader("Add New Expense")
-
+# Top Section: Input Form
+with st.expander("Add New Expense", expanded=True):
     with st.form("expense_form", clear_on_submit=True):
-        cat_input = st.selectbox("Category", CATEGORIES)
-        amt_input = st.number_input("Amount ($)", min_value=0.01, step=0.01, format="%.2f")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            cat_input = st.selectbox("Category", CATEGORIES)
+        with c2:
+            amt_input = st.number_input("Amount ($)", min_value=0.01, step=0.01, format="%.2f")
+        with c3:
+            payer_input = st.selectbox("Who Paid?", ["H", "M"])
+        with c4:
+            consumer_input = st.selectbox("Who Used It?", ["Split", "H only", "M only"])
 
-        # Radio buttons for quick selection
-        payer_input = st.radio("Who Paid?", ["H", "M"], horizontal=True)
-        consumer_input = st.radio("Who Used It?", ["Split", "H only", "M only"], horizontal=True)
-
-        submitted = st.form_submit_button("Add Expense", use_container_width=True, type="primary")
+        submitted = st.form_submit_button("Add Expense", type="primary")
 
         if submitted:
             add_expense(cat_input, amt_input, payer_input, consumer_input)
-            st.success(f"Added ${amt_input} to {cat_input}")
+            st.success("Expense added! Scroll down to edit or delete.")
 
-with col2:
-    # Calculate Settlement
-    tp_h, tp_m, cost_h, cost_m, balance = calculate_settlement()
+st.divider()
+
+# Main Interface: Two Columns
+col_left, col_right = st.columns([2, 1], gap="large")
+
+with col_left:
+    st.subheader("Expense History (Edit Mode)")
+    st.caption("Double-click any cell to edit. Select rows and press 'Delete' to remove.")
+
+    # Convert session state list to DataFrame for the editor
+    df = pd.DataFrame(st.session_state.expenses)
+
+    # If df is empty, we need valid columns for the editor to show correctly
+    if df.empty:
+        df = pd.DataFrame(columns=["Category", "Amount", "Payer", "Consumer"])
+
+    # --- THE DATA EDITOR ---
+    edited_df = st.data_editor(
+        df,
+        num_rows="dynamic",  # Allows Adding/Deleting rows directly in table
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Category": st.column_config.SelectboxColumn(
+                "Category",
+                help="Select expense category",
+                width="medium",
+                options=CATEGORIES,
+                required=True,
+            ),
+            "Amount": st.column_config.NumberColumn(
+                "Amount ($)",
+                help="Cost in USD",
+                min_value=0.01,
+                format="$%.2f",
+                required=True,
+            ),
+            "Payer": st.column_config.SelectboxColumn(
+                "Who Paid?",
+                options=["H", "M"],
+                required=True,
+            ),
+            "Consumer": st.column_config.SelectboxColumn(
+                "Who Used?",
+                options=["Split", "H only", "M only"],
+                required=True,
+            )
+        },
+        key="editor"
+    )
+
+    # Sync changes back to session state so they persist
+    # We convert the edited dataframe back to a list of dicts
+    current_data = edited_df.to_dict('records')
+    st.session_state.expenses = current_data
+
+with col_right:
+    # Use the current_data (from the editor) for calculations immediately
+    tp_h, tp_m, cost_h, cost_m, balance = calculate_settlement(current_data)
 
     st.subheader("Settlement")
 
     # Styled Result Card
     if abs(balance) < 0.01:
-        st.info("You are all square!")
+        st.info("All Square!")
     elif balance > 0:
-        st.info(f"👉 **M owes H: ${abs(balance):.2f}**")
+        st.success(f"**M owes H: ${abs(balance):.2f}**")
     else:
-        st.info(f"👉 **H owes M: ${abs(balance):.2f}**")
+        st.warning(f"**H owes M: ${abs(balance):.2f}**")
 
-    # Metrics Row
-    m1, m2 = st.columns(2)
-    m1.metric("Total Paid by H", f"${tp_h:.2f}")
-    m2.metric("Total Paid by M", f"${tp_m:.2f}")
+    st.metric("Total Paid by H", f"${tp_h:.2f}")
+    st.metric("Total Paid by M", f"${tp_m:.2f}")
 
-    st.divider()
+    st.markdown("---")
 
-    # Expense List
-    st.subheader("History")
-
-    if st.session_state.expenses:
-        # Display custom table with delete buttons
-        # Header
-        col_h1, col_h2, col_h3, col_h4, col_h5 = st.columns([3, 2, 1.5, 2, 1])
-        col_h1.markdown("**Category**")
-        col_h2.markdown("**Amount**")
-        col_h3.markdown("**Paid**")
-        col_h4.markdown("**Used**")
-        col_h5.markdown("**Del**")
-
-        # Iterate through expenses (newest first)
-        for i, exp in enumerate(reversed(st.session_state.expenses)):
-            # Calculate original index because we are iterating in reverse
-            original_index = len(st.session_state.expenses) - 1 - i
-
-            c1, c2, c3, c4, c5 = st.columns([3, 2, 1.5, 2, 1])
-            c1.write(exp["Category"])
-            c2.write(f"${exp['Amount']:.2f}")
-            c3.write(exp["Payer"])
-            c4.write(exp["Consumer"])
-
-            # Delete button with unique key based on expense ID
-            if c5.button("🗑️", key=f"del_{exp['id']}", help="Delete this expense"):
-                remove_expense(original_index)
-                st.rerun()
-
-        # CSV Download
-        csv_data = generate_csv()
+    # CSV Download
+    if current_data:
+        csv_data = generate_csv(current_data)
         st.download_button(
-            label="Download CSV for Google Sheets",
+            label="📥 Download CSV",
             data=csv_data,
             file_name="monthly_expenses.csv",
             mime="text/csv",
-            type="secondary"
+            type="primary",
+            use_container_width=True
         )
-    else:
-        st.caption("No expenses added yet.")
